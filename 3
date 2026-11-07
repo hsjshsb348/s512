@@ -1,7 +1,47 @@
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+-- المتغيرات الأساسية للتحكم بالخريطة
+local mapOpen = true
+local transitioning = false
+local dragging = false
+local dragDist = 0
+local DRAG_THRESHOLD = 10
+local ISLAND_Y = 0 
+local camCenter = Vector2.new(0, 0)
+local camHeight = 100
+
+-- البحث عن خانة عرض الحالة (StatusLabel) إن وجدت
+local playerGui = player:WaitForChild("PlayerGui")
+local statusLabel = nil
+-- (يمكنك تركها هكذا ولن تحدث أي أخطاء حتى لو لم تكن موجودة)
+
+local function isPanInput(input)
+	return input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton2
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if not mapOpen or transitioning then
+		return
+	end
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragDist = 0
+		dragging = true
+	elseif isPanInput(input) then
+		dragDist = 0
+		dragging = true
+	end
+end)
+
 UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
 		if mapOpen and not transitioning and dragDist < DRAG_THRESHOLD then
-			-- حساب الإحداثيات في الماب بناءً على مكان الماوس على الشاشة
+			-- حساب الإحداثيات في الخريطة بناءً على مكان الماوس على الشاشة
 			local mouseLocation = UserInputService:GetMouseLocation() - camera.ViewportSize / 2
 			local viewportHeight = math.max(camera.ViewportSize.Y, 1)
 			
@@ -14,7 +54,7 @@ UserInputService.InputEnded:Connect(function(input)
 				camCenter.Y + mouseLocation.Y * studsPerPixel
 			)
 			
-			-- البحث عن الحدث وإرسال الإحداثيات للسيرفر بشكل آمن ومضمون
+			-- إرسال الإحداثيات للسيرفر بشكل آمن ومضمون
 			local remote = ReplicatedStorage:FindFirstChild("MapTargetSelected")
 			if remote then
 				remote:FireServer(targetWorldPos)
@@ -23,11 +63,12 @@ UserInputService.InputEnded:Connect(function(input)
 				warn("⚠️ خطأ: لم يتم العثور على RemoteEvent باسم MapTargetSelected في ReplicatedStorage!")
 			end
 			
-			statusLabel.Text = "TARGET POSITION LOCKED!"
+			if statusLabel then
+				statusLabel.Text = "TARGET POSITION LOCKED!"
+			end
 		end
 		
 		dragging = false
-		
 	elseif isPanInput(input) then
 		dragging = false
 	end
