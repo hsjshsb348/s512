@@ -1,0 +1,96 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- 1. التأكد من وجود الحدث أو إنشاؤه
+local remoteEvent = ReplicatedStorage:FindFirstChild("MapTargetSelected")
+if not remoteEvent then
+	remoteEvent = Instance.new("RemoteEvent")
+	remoteEvent.Name = "MapTargetSelected"
+	remoteEvent.Parent = ReplicatedStorage
+end
+
+-- 2. إحداثيات الجزر
+local islandsPositions = {
+	["Island 1"] = Vector3.new(-400, 38, -400),
+	["Island 2"] = Vector3.new(21, 38, 586),
+	["Island 3"] = Vector3.new(425, 38, -400),
+	["Island 4"] = Vector3.new(16, 38, -569),
+	["Island 5"] = Vector3.new(425, 38, 425),
+	["Island 6"] = Vector3.new(-390, 38, 420),
+	["Island 7"] = Vector3.new(-677, 38, 11),
+	["Island 8"] = Vector3.new(714, 38, 6),
+}
+
+-- 3. جلب الصاروخ الموجود مباشرة في الماب (Workspace)
+local rocketModel = workspace:WaitForChild("Rocket") -- تأكد أن اسم نموذج الصاروخ في الـ Workspace هو Rocket
+local primaryPart = rocketModel.PrimaryPart or rocketModel:GetChildren()[1]
+
+-- التأكد من بقاء الصاروخ ثابتاً في مكانه في بداية اللعبة
+for _, part in ipairs(rocketModel:GetDescendants()) do
+	if part:IsA("BasePart") then
+		part.Anchored = true
+	end
+end
+
+local isLaunched = false
+
+-- 4. دالة إطلاق الصاروخ من مكانه الحالي بحركة مقوسة نحو الهدف
+local function launchRocketToTarget(targetPos)
+	if isLaunched then return end -- لمنع إطلاقه أكثر من مرة
+	isLaunched = true
+
+	if not primaryPart then
+		warn("⚠️ الصاروخ لا يحتوي على PrimaryPart!")
+		return
+	end
+
+	-- إلغاء التثبيت لكي يتحرك الصاروخ بحرية
+	for _, part in ipairs(rocketModel:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.Anchored = false
+		end
+	end
+
+	print("🚀 انطلق الصاروخ من منصته في الماب!")
+
+	-- حساب مسار الطيران (Bezier Curve) من نقطة تواجده الحالية إلى الهدف
+	task.spawn(function()
+		local startPos = primaryPart.Position
+		local maxAltitude = 500 -- ارتفاع القوس في السماء
+		local controlPoint = startPos:Lerp(targetPos, 0.5) + Vector3.new(0, maxAltitude, 0)
+		
+		local steps = 150
+		local flightDuration = 4.5
+
+		for i = 0, steps do
+			local t = i / steps
+			local currentPos = (1 - t)^2 * startPos + 2 * (1 - t) * t * controlPoint + t^2 * targetPos
+			
+			if i < steps then
+				local nextT = (i + 1) / steps
+				local nextPos = (1 - nextT)^2 * startPos + 2 * (1 - nextT) * t * controlPoint + nextT^2 * targetPos
+				primaryPart.CFrame = CFrame.new(currentPos, nextPos)
+			else
+				primaryPart.CFrame = CFrame.new(currentPos, targetPos)
+			end
+
+			task.wait(flightDuration / steps)
+		end
+
+		-- حدوث انفجار عند الاصطدام بالجزيرة المستهدفة
+		local explosion = Instance.new("Explosion")
+		explosion.Position = primaryPart.Position
+		explosion.Parent = workspace
+
+		-- تدمير الصاروخ بعد وصوله للهدف
+		rocketModel:Destroy()
+	end)
+end
+
+-- 5. الاستماع لاختيار اللاعب للهدف من خريطة التكتيك
+remoteEvent.OnServerEvent:Connect(function(player, targetName)
+	local targetPos = islandsPositions[targetName]
+	if targetPos then
+		print("🎯 اللاعب " .. player.Name .. " اختار ضرب: " .. targetName)
+		launchRocketToTarget(targetPos)
+	end
+end)
