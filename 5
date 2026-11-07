@@ -1,1 +1,936 @@
+--[[
+	TacticalMapClient (نسخة محسّنة)
+	النوع: LocalScript
+	المكان: StarterPlayer > StarterPlayerScripts
 
+	التعديلات عن النسخة السابقة:
+	- دعم اللمس للجوال: سحب بإصبع = تحريك، قرصة بإصبعين = تقريب، ضغطة = إطلاق.
+	- علامات اللاعبين صارت Frame بدل TextButton حتى لا تبتلع النقر.
+	- ألوان الفرق: أخضر = أنت، أزرق = زميل، أحمر = عدو.
+	- Cooldown في العميل + التأكد من وجود الـ RemoteEvent قبل الإرسال.
+	- تحويل مكان النقر إلى إحداثيات العالم بواسطة Ray (أدق وأبسط).
+	- نص التعليمات ما يتغير بعد الإطلاق (التوست ما يستبدله).
+	- طلب بث المنطقة (Streaming) أثناء تحريك الخريطة لو StreamingEnabled مفعّل.
+	- زر MAP انرفع شوي عشان ما يتداخل مع زر القفز في الجوال.
+	- تنظيف: حذف print والمتغيرات غير المستخدمة.
+
+	تنبيه مهم: السيرفر لازم يتحقق من الإحداثيات المرسلة
+	(نوع القيمة، حدود الخريطة، الفريق، الـ Cooldown). لا تثق بالعميل.
+--]]
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GuiService = game:GetService("GuiService")
+
+local LocalPlayer = Players.LocalPlayer
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+while not workspace.CurrentCamera do
+	workspace:GetPropertyChangedSignal("CurrentCamera"):Wait()
+end
+
+local camera = workspace.CurrentCamera
+local mapRemote = nil
+
+----------------------------------------------------------------
+-- الإعدادات
+----------------------------------------------------------------
+
+local REMOTE_NAME = "MapTargetSelected"
+local FIRE_COOLDOWN = 1 -- خله يطابق الـ Cooldown في السيرفر
+local ISLAND_Y = 38
+local ZOOM_PRESETS = { 900, 480, 200 }
+local ZOOM_LABELS = { "X1", "X5", "X10" }
+
+local MIN_HEIGHT = 150
+local MAX_HEIGHT = 1200
+local DRAG_THRESHOLD = 15 -- أقصى حركة للماوس تُعتبر نقرة
+local TAP_THRESHOLD = 24 -- أقصى حركة للإصبع تُعتبر ضغطة
+local STREAM_REQUEST_DISTANCE = 150
+
+local DEFAULT_STATUS = "Drag / WASD: move  |  Scroll / Pinch: zoom  |  Click / Tap: launch rocket"
+
+local COLOR_PANEL = Color3.fromRGB(20, 28, 42)
+local COLOR_ACCENT = Color3.fromRGB(0, 170, 255)
+local COLOR_SELF = Color3.fromRGB(60, 220, 120)
+local COLOR_ALLY = Color3.fromRGB(80, 180, 255)
+local COLOR_OTHER = Color3.fromRGB(235, 80, 80)
+local COLOR_TARGET = Color3.fromRGB(255, 70, 70)
+
+----------------------------------------------------------------
+-- الحالة
+----------------------------------------------------------------
+
+local mapOpen = false
+local transitioning = false
+local dragging = false
+local dragStartPos = Vector2.zero
+
+local touches = {}
+local touchCount = 0
+local gestureMultiTouch = false
+local lastPinchDist = nil
+
+local camHeight = ZOOM_PRESETS[1]
+local camCenter = Vector2.zero
+local mapCenterDefault = Vector2.new(0, 0)
+
+local savedCamType = Enum.CameraType.Custom
+local savedFieldOfView = 70
+local savedCamCFrame = camera.CFrame
+
+local markers = {}
+local entitySignature = ""
+
+local cameraTween = nil
+local transitionVersion = 0
+local toastVersion = 0
+local toastTween = nil
+
+local lastFire = 0
+local lastStreamPos = nil
+
+local openMap
+local closeMap
+local refreshMarkers
+local setMapHeight
+
+local controls = nil
+local controlsDisabledByMap = false
+
+local function resetPointerState()
+	dragging = false
+	table.clear(touches)
+	touchCount = 0
+	gestureMultiTouch = false
+	lastPinchDist = nil
+end
+
+task.spawn(function()
+	local playerScripts = LocalPlayer:WaitForChild("PlayerScripts")
+	local playerModule = playerScripts:WaitForChild("PlayerModule", 10)
+
+	if not playerModule then return end
+
+	local success, module = pcall(require, playerModule)
+	if success and module then
+		controls = module:GetControls()
+		if mapOpen then
+			controls:Disable()
+			controlsDisabledByMap = true
+		end
+	end
+end)
+
+local function setMapControls(active)
+	if not controls then return end
+	if active then
+		controls:Disable()
+		controlsDisabledByMap = true
+	elseif controlsDisabledByMap then
+		controls:Enable()
+		controlsDisabledByMap = false
+	end
+end
+
+local function new(className, props, children)
+	local instance = Instance.new(className)
+	for key, value in pairs(props or {}) do
+		instance[key] = value
+	end
+	for _, child in ipairs(children or {}) do
+		child.Parent = instance
+	end
+	return instance
+end
+
+local function makeCorner(parent, radius)
+	return new("UICorner", {
+		CornerRadius = UDim.new(0, radius),
+		Parent = parent,
+	})
+end
+
+local function makeStroke(parent, color, thickness, transparency)
+	return new("UIStroke", {
+		Color = color or Color3.new(1, 1, 1),
+		Thickness = thickness or 2,
+		Transparency = transparency or 0,
+		Parent = parent,
+	})
+end
+
+----------------------------------------------------------------
+-- الواجهة
+----------------------------------------------------------------
+
+local mapGui = new("ScreenGui", {
+	Name = "TacticalMapGui",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	DisplayOrder = 5,
+	Enabled = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	Parent = playerGui,
+})
+
+local buttonGui = new("ScreenGui", {
+	Name = "TacticalMapButtonGui",
+	ResetOnSpawn = false,
+	DisplayOrder = 10,
+	Parent = playerGui,
+})
+
+local toggleBtn = new("TextButton", {
+	Name = "MapToggleButton",
+	Text = "MAP",
+	Font = Enum.Font.GothamBold,
+	TextSize = 16,
+	TextColor3 = Color3.new(1, 1, 1),
+	BackgroundColor3 = COLOR_PANEL,
+	Size = UDim2.fromOffset(96, 40),
+	Position = UDim2.new(1, -18, 1, -160), -- مرفوع عن زر القفز في الجوال
+	AnchorPoint = Vector2.new(1, 1),
+	AutoButtonColor = true,
+	Parent = buttonGui,
+})
+
+makeCorner(toggleBtn, 10)
+makeStroke(toggleBtn, COLOR_ACCENT, 2, 0.4)
+
+local overlay = new("Frame", {
+	Name = "Overlay",
+	BackgroundTransparency = 1,
+	Size = UDim2.fromScale(1, 1),
+	Parent = mapGui,
+})
+
+local markerLayer = new("Frame", {
+	Name = "MarkerLayer",
+	BackgroundTransparency = 1,
+	Size = UDim2.fromScale(1, 1),
+	ZIndex = 1,
+	Parent = overlay,
+})
+
+local topBar = new("Frame", {
+	Name = "TopBar",
+	BackgroundColor3 = COLOR_PANEL,
+	BackgroundTransparency = 0.15,
+	Size = UDim2.new(1, 0, 0, 74),
+	ZIndex = 5,
+	Parent = overlay,
+})
+
+makeStroke(topBar, COLOR_ACCENT, 1, 0.6)
+
+new("TextLabel", {
+	Name = "Title",
+	Text = "TACTICAL STRATEGY MAP",
+	Font = Enum.Font.GothamBold,
+	TextSize = 18,
+	TextColor3 = COLOR_ACCENT,
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, -90, 0, 34),
+	Position = UDim2.fromOffset(16, 4),
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 6,
+	Parent = topBar,
+})
+
+new("TextLabel", {
+	Name = "Status",
+	Text = DEFAULT_STATUS,
+	Font = Enum.Font.Gotham,
+	TextSize = 13,
+	TextColor3 = Color3.fromRGB(170, 185, 205),
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, -90, 0, 30),
+	Position = UDim2.fromOffset(16, 36),
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextWrapped = true,
+	ZIndex = 6,
+	Parent = topBar,
+})
+
+local closeBtn = new("TextButton", {
+	Name = "CloseButton",
+	Text = "X",
+	Font = Enum.Font.GothamBold,
+	TextSize = 18,
+	TextColor3 = Color3.new(1, 1, 1),
+	BackgroundColor3 = Color3.fromRGB(170, 45, 45),
+	Size = UDim2.fromOffset(38, 38),
+	Position = UDim2.new(1, -16, 0.5, 0),
+	AnchorPoint = Vector2.new(1, 0.5),
+	ZIndex = 6,
+	Parent = topBar,
+})
+
+makeCorner(closeBtn, 8)
+
+local zoomPanel = new("Frame", {
+	Name = "ZoomPanel",
+	BackgroundColor3 = COLOR_PANEL,
+	BackgroundTransparency = 0.15,
+	Size = UDim2.fromOffset(64, 44 + 46 * #ZOOM_PRESETS),
+	Position = UDim2.new(1, -16, 0.5, 0),
+	AnchorPoint = Vector2.new(1, 0.5),
+	ZIndex = 5,
+	Parent = overlay,
+})
+
+makeCorner(zoomPanel, 10)
+makeStroke(zoomPanel, COLOR_ACCENT, 1, 0.6)
+
+new("TextLabel", {
+	Name = "ZoomTitle",
+	Text = "ZOOM",
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = COLOR_ACCENT,
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, 0, 0, 26),
+	ZIndex = 6,
+	Parent = zoomPanel,
+})
+
+local zoomButtons = {}
+
+for index, height in ipairs(ZOOM_PRESETS) do
+	local button = new("TextButton", {
+		Name = ZOOM_LABELS[index],
+		Text = ZOOM_LABELS[index],
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = Color3.new(1, 1, 1),
+		BackgroundColor3 = Color3.fromRGB(30, 42, 62),
+		Size = UDim2.fromOffset(48, 36),
+		Position = UDim2.new(0.5, 0, 0, 34 + (index - 1) * 46),
+		AnchorPoint = Vector2.new(0.5, 0),
+		ZIndex = 6,
+		Parent = zoomPanel,
+	})
+
+	makeCorner(button, 8)
+
+	zoomButtons[index] = {
+		button = button,
+		height = height,
+	}
+
+	button.Activated:Connect(function()
+		setMapHeight(height)
+	end)
+end
+
+local toast = new("TextLabel", {
+	Name = "Toast",
+	Text = "",
+	Font = Enum.Font.GothamBold,
+	TextSize = 16,
+	TextColor3 = Color3.new(1, 1, 1),
+	BackgroundColor3 = COLOR_TARGET,
+	BackgroundTransparency = 0.1,
+	Size = UDim2.new(0.7, 0, 0, 44),
+	Position = UDim2.new(0.5, 0, 0, 90),
+	AnchorPoint = Vector2.new(0.5, 0),
+	Visible = false,
+	ZIndex = 7,
+	Parent = overlay,
+})
+
+makeCorner(toast, 10)
+
+----------------------------------------------------------------
+-- العلامات (Markers)
+----------------------------------------------------------------
+
+local function getHrpPosition(character)
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	return root and root.Position or nil
+end
+
+local function makeMarker(config)
+	-- Frame وليس TextButton: حتى لا تبتلع النقر وتمنع إطلاق الصاروخ
+	local marker = new("Frame", {
+		Name = config.name,
+		BackgroundColor3 = config.color,
+		BackgroundTransparency = config.transparency or 0,
+		Size = UDim2.fromOffset(config.size, config.size),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Visible = false,
+		ZIndex = 2,
+		Parent = markerLayer,
+	})
+
+	new("UICorner", {
+		CornerRadius = config.square
+			and UDim.new(0, math.floor(config.size * 0.18))
+			or UDim.new(1, 0),
+		Parent = marker,
+	})
+
+	makeStroke(
+		marker,
+		config.strokeColor or Color3.new(1, 1, 1),
+		config.strokeThickness or 2,
+		0.2
+	)
+
+	if config.label then
+		new("TextLabel", {
+			Name = "Label",
+			Text = config.label,
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextColor3 = Color3.fromRGB(225, 235, 245),
+			BackgroundTransparency = 1,
+			Size = UDim2.fromOffset(160, 18),
+			Position = UDim2.new(0.5, 0, 1, 4),
+			AnchorPoint = Vector2.new(0.5, 0),
+			TextStrokeTransparency = 0.4,
+			ZIndex = 3,
+			Parent = marker,
+		})
+	end
+
+	return {
+		gui = marker,
+		posFn = config.posFn,
+	}
+end
+
+local function triggerToast(msg)
+	toastVersion += 1
+	local version = toastVersion
+
+	if toastTween then
+		toastTween:Cancel()
+		toastTween = nil
+	end
+
+	toast.Text = string.upper(msg)
+	toast.Visible = true
+	toast.BackgroundTransparency = 0.1
+	toast.TextTransparency = 0
+
+	task.delay(1.5, function()
+		if version ~= toastVersion then return end
+		local fade = TweenService:Create(
+			toast,
+			TweenInfo.new(0.4),
+			{ BackgroundTransparency = 1, TextTransparency = 1 }
+		)
+		toastTween = fade
+		fade.Completed:Once(function()
+			if version == toastVersion then
+				toast.Visible = false
+				toastTween = nil
+			end
+		end)
+		fade:Play()
+	end)
+end
+
+refreshMarkers = function()
+	local entities = {}
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character then
+			local isSelf = player == LocalPlayer
+			local team = player.Team
+			local isAlly = (not isSelf) and team ~= nil and team == LocalPlayer.Team
+
+			local relation = "enemy"
+			local color = COLOR_OTHER
+			if isSelf then
+				relation = "self"
+				color = COLOR_SELF
+			elseif isAlly then
+				relation = "ally"
+				color = COLOR_ALLY
+			end
+
+			table.insert(entities, {
+				key = "player:" .. player.Name .. ":" .. relation,
+				config = {
+					name = "Player_" .. player.Name,
+					size = 16,
+					color = color,
+					label = player.DisplayName,
+					posFn = function()
+						return getHrpPosition(player.Character)
+					end,
+				},
+			})
+		end
+	end
+
+	table.sort(entities, function(a, b)
+		return a.key < b.key
+	end)
+
+	local signatureParts = {}
+	for _, entity in ipairs(entities) do
+		table.insert(signatureParts, entity.key .. ":" .. (entity.config.label or ""))
+	end
+
+	local signature = table.concat(signatureParts, "|")
+	if signature == entitySignature then return end
+
+	entitySignature = signature
+	markerLayer:ClearAllChildren()
+	markers = {}
+
+	for _, entity in ipairs(entities) do
+		table.insert(markers, makeMarker(entity.config))
+	end
+end
+
+----------------------------------------------------------------
+-- الكاميرا
+----------------------------------------------------------------
+
+local function computeMapCFrame()
+	local position = Vector3.new(
+		camCenter.X,
+		ISLAND_Y + camHeight,
+		camCenter.Y
+	)
+	return CFrame.new(position) * CFrame.Angles(-math.pi / 2, 0, 0)
+end
+
+local function getStudsPerPixel()
+	local viewportHeight = math.max(camera.ViewportSize.Y, 1)
+	return (2 * math.tan(math.rad(camera.FieldOfView * 0.5)) * camHeight) / viewportHeight
+end
+
+local function panByPixels(delta)
+	camCenter -= delta * getStudsPerPixel()
+end
+
+setMapHeight = function(height)
+	camHeight = math.clamp(height, MIN_HEIGHT, MAX_HEIGHT)
+	for _, entry in ipairs(zoomButtons) do
+		local active = math.abs(entry.height - camHeight) < 1
+		entry.button.BackgroundColor3 = active and COLOR_ACCENT or Color3.fromRGB(30, 42, 62)
+		entry.button.TextColor3 = active and Color3.new(1, 1, 1) or Color3.fromRGB(200, 210, 225)
+	end
+end
+
+-- يحول نقطة على الشاشة (إحداثيات الـ Viewport) إلى نقطة في العالم على ارتفاع ISLAND_Y
+local function screenToWorld(screenPos)
+	local ray = camera:ViewportPointToRay(screenPos.X, screenPos.Y)
+	if math.abs(ray.Direction.Y) < 1e-4 then return nil end
+
+	local t = (ISLAND_Y - ray.Origin.Y) / ray.Direction.Y
+	if t <= 0 then return nil end
+
+	return ray.Origin + ray.Direction * t
+end
+
+local function updateMarkerPositions()
+	for _, marker in ipairs(markers) do
+		local position = marker.posFn and marker.posFn()
+		if position then
+			local screenPoint, onScreen = camera:WorldToViewportPoint(position)
+			marker.gui.Visible = onScreen
+			if onScreen then
+				marker.gui.Position = UDim2.fromOffset(screenPoint.X, screenPoint.Y)
+			end
+		else
+			marker.gui.Visible = false
+		end
+	end
+end
+
+-- لو StreamingEnabled مفعّل: نطلب من السيرفر بث المنطقة اللي نشوفها في الخريطة
+local function requestStreaming()
+	if not workspace.StreamingEnabled then return end
+
+	local target = Vector3.new(camCenter.X, ISLAND_Y, camCenter.Y)
+	if lastStreamPos and (target - lastStreamPos).Magnitude < STREAM_REQUEST_DISTANCE then
+		return
+	end
+	lastStreamPos = target
+
+	task.spawn(function()
+		pcall(function()
+			LocalPlayer:RequestStreamAroundAsync(target)
+		end)
+	end)
+end
+
+local function cancelCameraTween()
+	transitionVersion += 1
+	if cameraTween then
+		cameraTween:Cancel()
+		cameraTween = nil
+	end
+end
+
+openMap = function()
+	if mapOpen or transitioning then return end
+	camera = workspace.CurrentCamera
+	if not camera then return end
+
+	cancelCameraTween()
+
+	savedCamType = camera.CameraType
+	savedFieldOfView = camera.FieldOfView
+	savedCamCFrame = camera.CFrame
+
+	mapOpen = true
+	transitioning = true
+	resetPointerState()
+	lastStreamPos = nil
+
+	setMapControls(true)
+	setMapHeight(ZOOM_PRESETS[1])
+
+	camCenter = mapCenterDefault
+	mapGui.Enabled = true
+
+	entitySignature = ""
+	refreshMarkers()
+
+	toggleBtn.Text = "CLOSE"
+	toggleBtn.BackgroundColor3 = Color3.fromRGB(150, 40, 40)
+
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.FieldOfView = 50
+
+	local version = transitionVersion
+	cameraTween = TweenService:Create(
+		camera,
+		TweenInfo.new(0.9, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		{ CFrame = computeMapCFrame() }
+	)
+
+	cameraTween.Completed:Once(function(state)
+		if version ~= transitionVersion then return end
+		if state == Enum.PlaybackState.Completed then
+			transitioning = false
+			cameraTween = nil
+		end
+	end)
+
+	cameraTween:Play()
+end
+
+closeMap = function()
+	if not mapOpen then return end
+	cancelCameraTween()
+
+	mapOpen = false
+	transitioning = true
+	resetPointerState()
+
+	toastVersion += 1
+	if toastTween then
+		toastTween:Cancel()
+		toastTween = nil
+	end
+
+	toast.Visible = false
+	mapGui.Enabled = false
+
+	toggleBtn.Text = "MAP"
+	toggleBtn.BackgroundColor3 = COLOR_PANEL
+
+	local version = transitionVersion
+	cameraTween = TweenService:Create(
+		camera,
+		TweenInfo.new(0.7, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		{
+			CFrame = savedCamCFrame,
+			FieldOfView = savedFieldOfView,
+		}
+	)
+
+	cameraTween.Completed:Once(function(state)
+		if version ~= transitionVersion then return end
+		if state == Enum.PlaybackState.Completed then
+			camera.CameraType = savedCamType
+			transitioning = false
+			cameraTween = nil
+
+			setMapControls(false)
+			markerLayer:ClearAllChildren()
+			markers = {}
+			entitySignature = ""
+		end
+	end)
+
+	cameraTween:Play()
+end
+
+toggleBtn.Activated:Connect(function()
+	if mapOpen then
+		closeMap()
+	elseif not transitioning then
+		openMap()
+	end
+end)
+
+closeBtn.Activated:Connect(function()
+	closeMap()
+end)
+
+----------------------------------------------------------------
+-- الإدخال وإطلاق الصاروخ
+----------------------------------------------------------------
+
+local function isPanInput(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton2
+		or input.UserInputType == Enum.UserInputType.MouseButton3
+end
+
+local function getRemote()
+	if mapRemote and mapRemote.Parent then
+		return mapRemote
+	end
+
+	local remote = ReplicatedStorage:FindFirstChild(REMOTE_NAME)
+	if remote and remote:IsA("RemoteEvent") then
+		mapRemote = remote
+		return remote
+	end
+
+	return nil
+end
+
+-- screenPos بإحداثيات الـ Viewport (نفس إحداثيات GetMouseLocation)
+local function launchRocketAt(screenPos)
+	local remote = getRemote()
+	if not remote then
+		triggerToast("SERVER NOT READY")
+		return
+	end
+
+	local now = os.clock()
+	if now - lastFire < FIRE_COOLDOWN then
+		triggerToast("RELOADING...")
+		return
+	end
+
+	local target = screenToWorld(screenPos)
+	if not target then return end
+
+	lastFire = now
+	remote:FireServer(target)
+	triggerToast("ROCKET LAUNCHED TO TARGET!")
+end
+
+local function getPinchDistance()
+	local first, second
+	for _, data in pairs(touches) do
+		if not first then
+			first = data.pos
+		else
+			second = data.pos
+			break
+		end
+	end
+
+	if first and second then
+		return (first - second).Magnitude
+	end
+	return nil
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if not mapOpen or transitioning then return end
+
+	local inputType = input.UserInputType
+
+	if inputType == Enum.UserInputType.MouseButton1 then
+		dragStartPos = Vector2.new(input.Position.X, input.Position.Y)
+		if not gameProcessed then
+			dragging = true
+		end
+
+	elseif isPanInput(input) then
+		dragStartPos = Vector2.new(input.Position.X, input.Position.Y)
+		dragging = true
+
+	elseif inputType == Enum.UserInputType.Touch then
+		if gameProcessed then return end
+
+		local pos = Vector2.new(input.Position.X, input.Position.Y)
+		touches[input] = { start = pos, pos = pos }
+		touchCount += 1
+
+		if touchCount >= 2 then
+			gestureMultiTouch = true
+			lastPinchDist = getPinchDistance()
+		end
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if not mapOpen or transitioning then return end
+
+	local inputType = input.UserInputType
+
+	if inputType == Enum.UserInputType.MouseMovement then
+		if dragging then
+			panByPixels(Vector2.new(input.Delta.X, input.Delta.Y))
+		end
+
+	elseif inputType == Enum.UserInputType.MouseWheel then
+		setMapHeight(camHeight * (1 - input.Position.Z * 0.15))
+
+	elseif inputType == Enum.UserInputType.Touch then
+		local data = touches[input]
+		if not data then return end
+
+		local newPos = Vector2.new(input.Position.X, input.Position.Y)
+
+		if touchCount == 1 then
+			panByPixels(newPos - data.pos)
+			data.pos = newPos
+		else
+			data.pos = newPos
+			local dist = getPinchDistance()
+			if dist and lastPinchDist and dist > 1 then
+				setMapHeight(camHeight * (lastPinchDist / dist))
+			end
+			lastPinchDist = dist
+		end
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+	local inputType = input.UserInputType
+
+	-- اللمس: ننظف دائماً حتى لو الخريطة تغيّرت حالتها
+	if inputType == Enum.UserInputType.Touch then
+		local data = touches[input]
+		if not data then return end
+
+		touches[input] = nil
+		touchCount = math.max(touchCount - 1, 0)
+		lastPinchDist = nil
+
+		local endPos = Vector2.new(input.Position.X, input.Position.Y)
+		local wasTap = not gestureMultiTouch and (endPos - data.start).Magnitude < TAP_THRESHOLD
+
+		if touchCount == 0 then
+			gestureMultiTouch = false
+		end
+
+		if wasTap and not gameProcessed and mapOpen and not transitioning then
+			-- input.Position لا يحسب الـ GuiInset، و ViewportPointToRay يحتاجه
+			launchRocketAt(endPos + GuiService:GetGuiInset())
+		end
+		return
+	end
+
+	if not mapOpen or transitioning then return end
+
+	if inputType == Enum.UserInputType.MouseButton1 then
+		local endPos = Vector2.new(input.Position.X, input.Position.Y)
+		local movedDist = (endPos - dragStartPos).Magnitude
+
+		if not gameProcessed and movedDist < DRAG_THRESHOLD then
+			launchRocketAt(UserInputService:GetMouseLocation())
+		end
+		dragging = false
+
+	elseif isPanInput(input) then
+		dragging = false
+	end
+end)
+
+UserInputService.WindowFocusReleased:Connect(function()
+	resetPointerState()
+end)
+
+local function updateKeyboardMovement(dt)
+	if UserInputService:GetFocusedTextBox() then return end
+
+	local movement = Vector2.zero
+	if UserInputService:IsKeyDown(Enum.KeyCode.W) or UserInputService:IsKeyDown(Enum.KeyCode.Up) then
+		movement += Vector2.new(0, -1)
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.S) or UserInputService:IsKeyDown(Enum.KeyCode.Down) then
+		movement += Vector2.new(0, 1)
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.A) or UserInputService:IsKeyDown(Enum.KeyCode.Left) then
+		movement += Vector2.new(-1, 0)
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.D) or UserInputService:IsKeyDown(Enum.KeyCode.Right) then
+		movement += Vector2.new(1, 0)
+	end
+
+	if movement.Magnitude == 0 then return end
+
+	local speed = camHeight * 0.8
+	if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift) then
+		speed *= 2
+	end
+
+	camCenter += movement.Unit * speed * dt
+end
+
+----------------------------------------------------------------
+-- التحديث المستمر
+----------------------------------------------------------------
+
+RunService.RenderStepped:Connect(function(dt)
+	if mapOpen then
+		if not transitioning then
+			updateKeyboardMovement(dt)
+			camera.CFrame = computeMapCFrame()
+		end
+		updateMarkerPositions()
+	end
+end)
+
+task.spawn(function()
+	while mapGui.Parent do
+		if mapOpen and not transitioning then
+			refreshMarkers()
+			requestStreaming()
+		end
+		task.wait(1)
+	end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+	if not mapOpen and not transitioning then return end
+
+	cancelCameraTween()
+	mapOpen = false
+	transitioning = false
+	resetPointerState()
+
+	toastVersion += 1
+	if toastTween then
+		toastTween:Cancel()
+		toastTween = nil
+	end
+
+	toast.Visible = false
+	mapGui.Enabled = false
+
+	markerLayer:ClearAllChildren()
+	markers = {}
+	entitySignature = ""
+
+	toggleBtn.Text = "MAP"
+	toggleBtn.BackgroundColor3 = COLOR_PANEL
+
+	camera = workspace.CurrentCamera
+	if camera then
+		camera.FieldOfView = savedFieldOfView
+		camera.CameraType = Enum.CameraType.Custom
+	end
+
+	setMapControls(false)
+end)
