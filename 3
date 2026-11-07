@@ -1,93 +1,34 @@
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-
--- التأكد من وجود الحدث أو إنشاؤه تلقائياً
-local remoteEvent = ReplicatedStorage:FindFirstChild("MapTargetSelected")
-if not remoteEvent then
-	remoteEvent = Instance.new("RemoteEvent")
-	remoteEvent.Name = "MapTargetSelected"
-	remoteEvent.Parent = ReplicatedStorage
-end
-
--- دالة إطلاق الصاروخ نحو الإحداثيات المستهدفة
-local function launchRocketToTarget(targetPos)
-	local rocketsFolder = Workspace:FindFirstChild("Rockets")
-	if not rocketsFolder then
-		warn("⚠️ تنبيه: يرجى إنشاء مجلد باسم 'Rockets' في الـ Workspace ووضع الصواريخ بداخله!")
-		return
-	end
-
-	-- العثور على أول صاروخ متاح داخل المجلد
-	local rocketModel = nil
-	for _, child in ipairs(rocketsFolder:GetChildren()) do
-		if child:IsA("Model") then
-			rocketModel = child
-			break
-		end
-	end
-
-	if not rocketModel then
-		print("⚠️ لا توجد صواريخ متاحة في مجلد Rockets حالياً!")
-		return
-	end
-
-	-- إخراج الصاروخ من المجلد لكي يتحرك بحرية في الـ Workspace
-	rocketModel.Parent = Workspace
-
-	local primaryPart = rocketModel.PrimaryPart or rocketModel:GetChildren()[1]
-	if not primaryPart then
-		warn("⚠️ الصاروخ لا يحتوي على PrimaryPart!")
-		rocketModel:Destroy()
-		return
-	end
-
-	-- إلغاء التثبيت عن جميع أجزاء الصاروخ لكي ينطلق
-	for _, part in ipairs(rocketModel:GetDescendants()) do
-		if part:IsA("BasePart") then
-			part.Anchored = false
-		end
-	end
-
-	print("🚀 انطلق الصاروخ نحو الموقع المحدد!")
-
-	-- مسار الطيران المقوس (Bezier Curve)
-	task.spawn(function()
-		local startPos = primaryPart.Position
-		local maxAltitude = 500 -- ارتفاع القوس في السماء
-		local controlPoint = startPos:Lerp(targetPos, 0.5) + Vector3.new(0, maxAltitude, 0)
-		
-		local steps = 150
-		local flightDuration = 4.5
-
-		for i = 0, steps do
-			local t = i / steps
-			local currentPos = (1 - t)^2 * startPos + 2 * (1 - t) * t * controlPoint + t^2 * targetPos
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if mapOpen and not transitioning and dragDist < DRAG_THRESHOLD then
+			-- حساب الإحداثيات في الماب بناءً على مكان الماوس على الشاشة
+			local mouseLocation = UserInputService:GetMouseLocation() - camera.ViewportSize / 2
+			local viewportHeight = math.max(camera.ViewportSize.Y, 1)
 			
-			if i < steps then
-				local nextT = (i + 1) / steps
-				local nextPos = (1 - nextT)^2 * startPos + 2 * (1 - nextT) * t * controlPoint + nextT^2 * targetPos
-				primaryPart.CFrame = CFrame.new(currentPos, nextPos)
+			local studsPerPixel = (2 * math.tan(math.rad(camera.FieldOfView * 0.5)) * camHeight) / viewportHeight
+			
+			-- تحويل شاشة الماوس إلى إحداثيات Vector3 في العالم الحقيقي
+			local targetWorldPos = Vector3.new(
+				camCenter.X + mouseLocation.X * studsPerPixel,
+				ISLAND_Y,
+				camCenter.Y + mouseLocation.Y * studsPerPixel
+			)
+			
+			-- البحث عن الحدث وإرسال الإحداثيات للسيرفر بشكل آمن ومضمون
+			local remote = ReplicatedStorage:FindFirstChild("MapTargetSelected")
+			if remote then
+				remote:FireServer(targetWorldPos)
+				print("📤 تم إرسال الإحداثيات إلى السيرفر بنجاح:", targetWorldPos)
 			else
-				primaryPart.CFrame = CFrame.new(currentPos, targetPos)
+				warn("⚠️ خطأ: لم يتم العثور على RemoteEvent باسم MapTargetSelected في ReplicatedStorage!")
 			end
-
-			task.wait(flightDuration / steps)
+			
+			statusLabel.Text = "TARGET POSITION LOCKED!"
 		end
-
-		-- انفجار عند الاصطدام بالمكان المحدد
-		local explosion = Instance.new("Explosion")
-		explosion.Position = primaryPart.Position
-		explosion.Parent = Workspace
-
-		-- تدمير الصاروخ بعد الوصول
-		rocketModel:Destroy()
-	end)
-end
-
--- استقبال الإحداثيات المباشرة عند الضغط بالماوس من الخريطة
-remoteEvent.OnServerEvent:Connect(function(player, targetData)
-	if typeof(targetData) == "Vector3" then
-		print("🎯 اللاعب " .. player.Name .. " حدد نقطة بالماوس لضربها!")
-		launchRocketToTarget(targetData)
+		
+		dragging = false
+		
+	elseif isPanInput(input) then
+		dragging = false
 	end
 end)
