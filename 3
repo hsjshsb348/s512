@@ -1,7 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
--- 1. التأكد من وجود الحدث المخصص لتحديد الأهداف أو إنشاؤه تلقائياً
+-- التأكد من وجود الحدث أو إنشاؤه تلقائياً
 local remoteEvent = ReplicatedStorage:FindFirstChild("MapTargetSelected")
 if not remoteEvent then
 	remoteEvent = Instance.new("RemoteEvent")
@@ -9,7 +9,7 @@ if not remoteEvent then
 	remoteEvent.Parent = ReplicatedStorage
 end
 
--- 2. دالة إطلاق الصاروخ نحو إحداثيات الماوس المباشرة
+-- دالة إطلاق الصاروخ نحو الإحداثيات المستهدفة
 local function launchRocketToTarget(targetPos)
 	local rocketsFolder = Workspace:FindFirstChild("Rockets")
 	if not rocketsFolder then
@@ -27,7 +27,7 @@ local function launchRocketToTarget(targetPos)
 	end
 
 	if not rocketModel then
-		print("⚠️ لا توجد صواريخ متاحة في المجلد حالياً!")
+		print("⚠️ لا توجد صواريخ متاحة في مجلد Rockets حالياً!")
 		return
 	end
 
@@ -50,7 +50,7 @@ local function launchRocketToTarget(targetPos)
 
 	print("🚀 انطلق الصاروخ نحو الموقع المحدد!")
 
-	-- تنفيذ مسار الطيران المقوس (Bezier Curve) في الخلفية
+	-- مسار الطيران المقوس (Bezier Curve)
 	task.spawn(function()
 		local startPos = primaryPart.Position
 		local maxAltitude = 500 -- ارتفاع القوس في السماء
@@ -74,19 +74,18 @@ local function launchRocketToTarget(targetPos)
 			task.wait(flightDuration / steps)
 		end
 
-		-- حدوث انفجار عند الوصول للمكان المحدد بالماوس
+		-- انفجار عند الاصطدام بالمكان المحدد
 		local explosion = Instance.new("Explosion")
 		explosion.Position = primaryPart.Position
 		explosion.Parent = Workspace
 
-		-- تدمير نموذج الصاروخ بعد انتهاء المهمة
+		-- تدمير الصاروخ بعد الوصول
 		rocketModel:Destroy()
 	end)
 end
 
--- 3. استقبال إحداثيات الماوس المباشرة عندما يضغط اللاعب على الخريطة
+-- استقبال الإحداثيات المباشرة عند الضغط بالماوس من الخريطة
 remoteEvent.OnServerEvent:Connect(function(player, targetData)
-	-- التأكد أن البيانات المرسلة هي إحداثيات Vector3
 	if typeof(targetData) == "Vector3" then
 		print("🎯 اللاعب " .. player.Name .. " حدد نقطة بالماوس لضربها!")
 		launchRocketToTarget(targetData)
