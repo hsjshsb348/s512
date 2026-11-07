@@ -6,7 +6,7 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local camera = workspace.CurrentCamera
 
--- 1. إنشاء واجهة الخريطة وزر التحكم تلقائياً
+-- إنشاء واجهة الخريطة وزر التحكم تلقائياً
 local screenGui = playerGui:FindFirstChild("TacticalMapGui")
 if not screenGui then
 	screenGui = Instance.new("ScreenGui")
@@ -19,7 +19,7 @@ local mapButton = screenGui:FindFirstChild("MapToggleButton")
 if not mapButton then
 	mapButton = Instance.new("TextButton")
 	mapButton.Name = "MapToggleButton"
-	mapButton.Size = UDim2.new(0, 130, 0, 50)
+	mapButton.Size = UDim2.new(0, 140, 0, 50)
 	mapButton.Position = UDim2.new(0, 20, 0, 20)
 	mapButton.BackgroundColor3 = Color3.fromRGB(30, 180, 50)
 	mapButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -33,7 +33,6 @@ if not mapButton then
 	corner.Parent = mapButton
 end
 
--- المتغيرات الأساسية
 local mapOpen = true
 local transitioning = false
 local dragging = false
@@ -44,15 +43,25 @@ local ISLAND_Y = 0
 local camCenter = Vector2.new(0, 0)
 local camHeight = 100
 
+-- دالة للتحقق هل ضغط اللاعب فوق الزر أم لا
+local function isMouseOverButton(mousePos)
+	local pos = mapButton.AbsolutePosition
+	local size = mapButton.AbsoluteSize
+	return mousePos.X >= pos.X and mousePos.X <= pos.X + size.X and
+	       mousePos.Y >= pos.Y and mousePos.Y <= pos.Y + size.Y
+end
+
 -- تفاعل زر فتح وإغلاق الخريطة
 mapButton.MouseButton1Click:Connect(function()
 	mapOpen = not mapOpen
 	if mapOpen then
 		mapButton.Text = "🗺️ إغلاق الخريطة"
 		mapButton.BackgroundColor3 = Color3.fromRGB(30, 180, 50)
+		print("🗺️ تم فتح الخريطة")
 	else
 		mapButton.Text = "🗺️ فتح الخريطة"
 		mapButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+		print("🗺️ تم إغلاق الخريطة")
 	end
 end)
 
@@ -60,10 +69,14 @@ local function isPanInput(input)
 	return input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton2
 end
 
--- بدء السحب للتحرك في الخريطة
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if not mapOpen or transitioning then
 		return
+	end
+
+	local mousePos = UserInputService:GetMouseLocation()
+	if isMouseOverButton(mousePos) then
+		return -- تجاهل الضغط إذا كان فوق الزر تماماً
 	end
 
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or isPanInput(input) then
@@ -73,7 +86,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 end)
 
--- حركة السحب لتغيير موقع الكاميرا يميناً ويساراً في الخريطة
 UserInputService.InputChanged:Connect(function(input)
 	if not mapOpen or not dragging then return end
 
@@ -85,19 +97,21 @@ UserInputService.InputChanged:Connect(function(input)
 			local viewportHeight = math.max(camera.ViewportSize.Y, 1)
 			local studsPerPixel = (2 * math.tan(math.rad(camera.FieldOfView * 0.5)) * camHeight) / viewportHeight
 			
-			-- تحريك مركز الكاميرا بناءً على حركة السحب (يمين، يسار، فوق، تحت)
 			camCenter = camCenter - Vector2.new(delta.X * studsPerPixel, delta.Y * studsPerPixel)
 			dragStart = input.Position
 		end
 	end
 end)
 
--- عند رفع الإصبع أو الماوس (إما إطلاق صاروخ أو إنهاء السحب)
 UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		local mousePos = UserInputService:GetMouseLocation()
+		if isMouseOverButton(mousePos) then
+			return -- تجاهل إطلاق الصاروخ إذا رفع الماوس فوق الزر
+		end
+
 		if mapOpen and not transitioning and dragDist < DRAG_THRESHOLD then
-			-- حساب الإحداثيات وإطلاق الصاروخ
-			local mouseLocation = UserInputService:GetMouseLocation() - camera.ViewportSize / 2
+			local mouseLocation = mousePos - camera.ViewportSize / 2
 			local viewportHeight = math.max(camera.ViewportSize.Y, 1)
 			local studsPerPixel = (2 * math.tan(math.rad(camera.FieldOfView * 0.5)) * camHeight) / viewportHeight
 			
