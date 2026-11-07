@@ -1,0 +1,33 @@
+You are an expert Roblox Luau developer. Below is a LocalScript for my Roblox war game. It goes in StarterPlayerScripts and creates a top-down tactical map. The player opens the map, pans and zooms it, and clicks or taps a point to launch a rocket by firing the RemoteEvent "MapTargetSelected" in ReplicatedStorage with a Vector3 world position. The server script that receives it is "[NAME / LOCATION]" (paste it too if you can see it).
+
+Please do the following:
+
+1. Review the script carefully and list every bug, logic error, race condition, memory leak, and anything that could break at runtime. Rank them by severity.
+
+2. Check the parts I'm least sure about and verify them against the current Roblox API:
+   - Converting the click/tap position to a world position (GuiInset handling for mouse vs touch, ViewportPointToRay).
+   - Touch support: one-finger pan, two-finger pinch zoom, tap to fire.
+   - Camera tweening between the normal camera and the map camera, including edge cases like dying or respawning while the map is open.
+   - Whether Player:RequestStreamAroundAsync is valid on the client, and how to make this map work correctly with StreamingEnabled.
+
+3. Review performance and code quality: unnecessary work per frame, repeated allocations, UI creation, event connections that are never disconnected, naming, structure, and readability.
+
+4. Review security. The client must never be trusted. Write or improve the server-side handler for "MapTargetSelected" with:
+   - Type check (must be a finite Vector3).
+   - Bounds check (target must be inside the map area, clamp Y).
+   - Per-player cooldown and rate limiting.
+   - Team / alive / ammo checks where it makes sense.
+   - A safe way to tell the client if the launch was accepted or rejected (so the "ROCKET LAUNCHED" message is only shown when it really worked).
+
+5. Improve mobile UX and general polish: touch target sizes, safe-area handling on phones, avoiding overlap with the default mobile jump button, and clear feedback for the player.
+
+Rules:
+- Keep all existing features and behavior unless something is clearly wrong.
+- Do not use deprecated APIs.
+- Add short comments only where the logic is not obvious.
+- Give me the complete final scripts (client and server) in separate code blocks, ready to copy and paste, not just snippets.
+- After the code, give a short summary of what you changed and why, and tell me exactly where each script should be placed in Studio.
+
+Here is the script:
+
+[PASTE THE SCRIPT HERE]
