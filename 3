@@ -3,72 +3,119 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 
 local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
 local camera = workspace.CurrentCamera
 
--- المتغيرات الأساسية للتحكم بالخريطة
+-- 1. إنشاء واجهة الخريطة وزر التحكم تلقائياً
+local screenGui = playerGui:FindFirstChild("TacticalMapGui")
+if not screenGui then
+	screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "TacticalMapGui"
+	screenGui.ResetOnSpawn = false
+	screenGui.Parent = playerGui
+end
+
+local mapButton = screenGui:FindFirstChild("MapToggleButton")
+if not mapButton then
+	mapButton = Instance.new("TextButton")
+	mapButton.Name = "MapToggleButton"
+	mapButton.Size = UDim2.new(0, 130, 0, 50)
+	mapButton.Position = UDim2.new(0, 20, 0, 20)
+	mapButton.BackgroundColor3 = Color3.fromRGB(30, 180, 50)
+	mapButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	mapButton.TextSize = 18
+	mapButton.Font = Enum.Font.SourceSansBold
+	mapButton.Text = "🗺️ إغلاق الخريطة"
+	mapButton.Parent = screenGui
+	
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = mapButton
+end
+
+-- المتغيرات الأساسية
 local mapOpen = true
 local transitioning = false
 local dragging = false
+local dragStart = Vector2.new(0, 0)
 local dragDist = 0
 local DRAG_THRESHOLD = 10
 local ISLAND_Y = 0 
 local camCenter = Vector2.new(0, 0)
 local camHeight = 100
 
--- البحث عن خانة عرض الحالة (StatusLabel) إن وجدت
-local playerGui = player:WaitForChild("PlayerGui")
-local statusLabel = nil
--- (يمكنك تركها هكذا ولن تحدث أي أخطاء حتى لو لم تكن موجودة)
+-- تفاعل زر فتح وإغلاق الخريطة
+mapButton.MouseButton1Click:Connect(function()
+	mapOpen = not mapOpen
+	if mapOpen then
+		mapButton.Text = "🗺️ إغلاق الخريطة"
+		mapButton.BackgroundColor3 = Color3.fromRGB(30, 180, 50)
+	else
+		mapButton.Text = "🗺️ فتح الخريطة"
+		mapButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+	end
+end)
 
 local function isPanInput(input)
 	return input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton2
 end
 
+-- بدء السحب للتحرك في الخريطة
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if not mapOpen or transitioning then
 		return
 	end
 
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		dragDist = 0
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or isPanInput(input) then
 		dragging = true
-	elseif isPanInput(input) then
+		dragStart = input.Position
 		dragDist = 0
-		dragging = true
 	end
 end)
 
+-- حركة السحب لتغيير موقع الكاميرا يميناً ويساراً في الخريطة
+UserInputService.InputChanged:Connect(function(input)
+	if not mapOpen or not dragging then return end
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		local delta = input.Position - dragStart
+		dragDist = dragDist + delta.Magnitude
+		
+		if dragDist > DRAG_THRESHOLD then
+			local viewportHeight = math.max(camera.ViewportSize.Y, 1)
+			local studsPerPixel = (2 * math.tan(math.rad(camera.FieldOfView * 0.5)) * camHeight) / viewportHeight
+			
+			-- تحريك مركز الكاميرا بناءً على حركة السحب (يمين، يسار، فوق، تحت)
+			camCenter = camCenter - Vector2.new(delta.X * studsPerPixel, delta.Y * studsPerPixel)
+			dragStart = input.Position
+		end
+	end
+end)
+
+-- عند رفع الإصبع أو الماوس (إما إطلاق صاروخ أو إنهاء السحب)
 UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
 		if mapOpen and not transitioning and dragDist < DRAG_THRESHOLD then
-			-- حساب الإحداثيات في الخريطة بناءً على مكان الماوس على الشاشة
+			-- حساب الإحداثيات وإطلاق الصاروخ
 			local mouseLocation = UserInputService:GetMouseLocation() - camera.ViewportSize / 2
 			local viewportHeight = math.max(camera.ViewportSize.Y, 1)
-			
 			local studsPerPixel = (2 * math.tan(math.rad(camera.FieldOfView * 0.5)) * camHeight) / viewportHeight
 			
-			-- تحويل شاشة الماوس إلى إحداثيات Vector3 في العالم الحقيقي
 			local targetWorldPos = Vector3.new(
 				camCenter.X + mouseLocation.X * studsPerPixel,
 				ISLAND_Y,
 				camCenter.Y + mouseLocation.Y * studsPerPixel
 			)
 			
-			-- إرسال الإحداثيات للسيرفر بشكل آمن ومضمون
 			local remote = ReplicatedStorage:FindFirstChild("MapTargetSelected")
 			if remote then
 				remote:FireServer(targetWorldPos)
 				print("📤 تم إرسال الإحداثيات إلى السيرفر بنجاح:", targetWorldPos)
-			else
-				warn("⚠️ خطأ: لم يتم العثور على RemoteEvent باسم MapTargetSelected في ReplicatedStorage!")
-			end
-			
-			if statusLabel then
-				statusLabel.Text = "TARGET POSITION LOCKED!"
 			end
 		end
 		
 		dragging = false
+		
 	elseif isPanInput(input) then
 		dragging = false
 	end
