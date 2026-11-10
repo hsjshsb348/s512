@@ -1,0 +1,144 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local Debris = game:GetService("Debris")
+
+local REMOTE_NAME = "MapTargetSelected"
+local RESULT_NAME = "MapLaunchResult"
+
+local FIRE_COOLDOWN = 0.4
+local MAP_RADIUS = 2000
+local TARGET_Y = 38
+
+local function getOrCreateRemote(name)
+	local remote = ReplicatedStorage:FindFirstChild(name)
+	if not remote then
+		remote = Instance.new("RemoteEvent")
+		remote.Name = name
+		remote.Parent = ReplicatedStorage
+	end
+	return remote
+end
+
+local remoteEvent = getOrCreateRemote(REMOTE_NAME)
+local resultEvent = getOrCreateRemote(RESULT_NAME)
+
+local lastFireByPlayer = {}
+
+Players.PlayerRemoving:Connect(function(player)
+	lastFireByPlayer[player] = nil
+end)
+
+local function isFiniteVector3(value)
+	if typeof(value) \~= "Vector3" then return false end
+	local x, y, z = value.X, value.Y, value.Z
+	if x \~= x or y \~= y or z \~= z then return false end
+	if math.abs(x) == math.huge or math.abs(y) == math.huge or math.abs(z) == math.huge then return false end
+	return true
+end
+
+local function isAlive(player)
+	local character = player.Character
+	if not character then return false end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid \~= nil and humanoid.Health > 0
+end
+
+local function createBigExplosion(position)
+	local explosion = Instance.new("Explosion")
+	explosion.Position = position
+	explosion.BlastRadius = 28
+	explosion.BlastPressure = 500000
+	explosion.DestroyJointRadiusPercent = 0.4
+	explosion.Parent = Workspace
+
+	local sound = Instance.new("Sound")
+	sound.SoundId = "rbxassetid://138081500"
+	sound.Volume = 3
+	sound.PlaybackSpeed = 0.9
+	sound.Parent = Workspace
+	sound:Play()
+	Debris:AddItem(sound, 4)
+end
+
+local function launchRocketToTarget(rocketName, targetPos)
+	local rocketsFolder = Workspace:FindFirstChild("Rockets")
+	if not rocketsFolder then
+		return false, "NO ROCKETS AVAILABLE"
+	end
+
+	local template = rocketsFolder:FindFirstChild(rocketName)
+	if not template or not template:IsA("Model") then
+		return false, "ROCKET NOT FOUND"
+	end
+
+	local rocketModel = template:Clone()
+	rocketModel.Parent = Workspace
+
+	task.spawn(function()
+		local startPos = rocketModel:GetPivot().Position
+		local controlPoint = startPos:Lerp(targetPos, 0.5) + Vector3.new(0, 450, 0)
+		local steps = 160
+		local flightDuration = 4.2
+
+		local function bezier(t)
+			return (1 - t)^2 * startPos + 2 * (1 - t) * t * controlPoint + t^2 * targetPos
+		end
+
+		for i = 0, steps do
+			local t = i / steps
+			local currentPos = bezier(t)
+			local aheadPos = bezier(math.min(t + 1 / steps, 1))
+			if (aheadPos - currentPos).Magnitude > 0.01 then
+				rocketModel:PivotTo(CFrame.lookAt(currentPos, aheadPos))
+			else
+				rocketModel:PivotTo(CFrame.new(currentPos))
+			end
+			task.wait(flightDuration / steps)
+		end
+
+		createBigExplosion(targetPos)
+		rocketModel:Destroy()
+	end)
+
+	return true, nil
+end
+
+remoteEvent.OnServerEvent:Connect(function(player, rocketName, targetPos)
+	local function respond(success, reason)
+		resultEvent:FireClient(player, success, reason)
+	end
+
+	if typeof(rocketName) \~= "string" then
+		respond(false, "CHOOSE A ROCKET")
+		return
+	end
+
+	if not isAlive(player) then
+		respond(false, "YOU MUST BE ALIVE")
+		return
+	end
+
+	local now = os.clock()
+	local lastFire = lastFireByPlayer[player]
+	if lastFire and now - lastFire < FIRE_COOLDOWN then
+		respond(false, "RELOADING")
+		return
+	end
+
+	if not isFiniteVector3(targetPos) then
+		respond(false, "INVALID TARGET")
+		return
+	end
+
+	if Vector3.new(targetPos.X, 0, targetPos.Z).Magnitude > MAP_RADIUS then
+		respond(false, "TARGET OUT OF BOUNDS")
+		return
+	end
+
+	targetPos = Vector3.new(targetPos.X, TARGET_Y, targetPos.Z)
+	lastFireByPlayer[player] = now
+
+	local success, reason = launchRocketToTarget(rocketName, targetPos)
+	respond(success, reason)
+end)
