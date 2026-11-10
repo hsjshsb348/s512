@@ -1,0 +1,74 @@
+local rocketPanel = Instance.new("Frame")
+rocketPanel.Name = "RocketPicker"
+rocketPanel.BackgroundColor3 = Color3.fromRGB(20, 28, 42)
+rocketPanel.BackgroundTransparency = 0.15
+rocketPanel.Size = UDim2.fromOffset(180, 420)
+rocketPanel.Position = UDim2.new(0, 16, 0.5, 0)
+rocketPanel.AnchorPoint = Vector2.new(0, 0.5)
+rocketPanel.ZIndex = 5
+rocketPanel.Parent = overlay
+
+local rocketTitle = Instance.new("TextLabel")
+rocketTitle.BackgroundTransparency = 1
+rocketTitle.Size = UDim2.new(1, 0, 0, 28)
+rocketTitle.Text = "الصواريخ"
+rocketTitle.Font = Enum.Font.GothamBold
+rocketTitle.TextSize = 14
+rocketTitle.TextColor3 = Color3.fromRGB(0, 170, 255)
+rocketTitle.ZIndex = 6
+rocketTitle.Parent = rocketPanel
+
+local rocketList = Instance.new("ScrollingFrame")
+rocketList.BackgroundTransparency = 1
+rocketList.Size = UDim2.new(1, -8, 1, -36)
+rocketList.Position = UDim2.fromOffset(4, 32)
+rocketList.CanvasSize = UDim2.fromOffset(0, 0)
+rocketList.ScrollBarThickness = 6
+rocketList.ZIndex = 6
+rocketList.Parent = rocketPanel
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.Padding = UDim.new(0, 6)
+listLayout.Parent = rocketList
+
+local function refreshRocketButtons()
+	for _, child in ipairs(rocketList:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+
+	local folder = workspace:FindFirstChild("Rockets")
+	if not folder then return end
+
+	local count = 0
+	for _, child in ipairs(folder:GetChildren()) do
+		if child:IsA("Model") then
+			count += 1
+			local button = Instance.new("TextButton")
+			button.Size = UDim2.new(1, -8, 0, 36)
+			button.Text = child.Name
+			button.Font = Enum.Font.GothamBold
+			button.TextSize = 14
+			button.TextColor3 = Color3.new(1, 1, 1)
+			button.BackgroundColor3 = (selectedRocket == child.Name) and Color3.fromRGB(0, 140, 220) or Color3.fromRGB(30, 42, 62)
+			button.ZIndex = 7
+			button.Parent = rocketList
+			button.Activated:Connect(function()
+				selectedRocket = child.Name
+				refreshRocketButtons()
+				triggerToast("SELECTED " .. child.Name)
+			end)
+		end
+	end
+	rocketList.CanvasSize = UDim2.fromOffset(0, count * 42)
+end
+
+task.spawn(function()
+	while mapGui.Parent do
+		if mapOpen then
+			refreshRocketButtons()
+		end
+		task.wait(1.5)
+	end
+end)
