@@ -1,7 +1,7 @@
 local RunService = game:GetService("RunService")
 local rocket = script.Parent
 
--- 1. البحث الآمن عن الجزء الأساسي بدون أخطاء
+-- 1. البحث الآمن عن الجزء الأساسي
 local primaryPart = nil
 if rocket:IsA("Model") then
 	primaryPart = rocket.PrimaryPart
@@ -27,7 +27,7 @@ for _, part in ipairs(rocket:GetDescendants()) do
 	end
 end
 
--- 3. جعل مقدمة الصاروخ تميل وتدور بواقعية مع اتجاه حركته (الفيزياء الهوائية)
+-- 3. توجيه الصاروخ بحيث يكون رأسه هو المتقدم دائماً
 local lastPosition = primaryPart.Position
 local currentLookDirection = primaryPart.CFrame.LookVector
 
@@ -42,7 +42,9 @@ RunService.Heartbeat:Connect(function(dt)
 		local smoothness = math.clamp(dt * 8, 0, 1)
 		currentLookDirection = currentLookDirection:Lerp(targetDirection, smoothness)
 		
-		local targetCFrame = CFrame.lookAt(currentPosition, currentPosition + currentLookDirection)
+		-- تعديل الدوران ليتناسب مع الصواريخ المصممة عمودياً (رأس الصاروخ للأعلى)
+		-- إذا لاحظت أن الرأس متوجه لجهة أخرى، يمكنك تغيير 90 إلى -90 أو إزالة الـ Angles
+		local targetCFrame = CFrame.lookAt(currentPosition, currentPosition + currentLookDirection) * CFrame.Angles(math.rad(90), 0, 0)
 		
 		if primaryPart.Anchored then
 			if rocket:IsA("Model") then
