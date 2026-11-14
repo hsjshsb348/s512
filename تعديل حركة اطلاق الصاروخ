@@ -1,0 +1,64 @@
+-- ضع هذا السكريبت داخل نموذج الصاروخ (Model)
+-- يعمل تلقائياً بمجرد إطلاق الصاروخ دون تعديل نظامك الأساسي
+
+local RunService = game:GetService("RunService")
+local rocket = script.Parent
+
+-- 1. تحديد الجزء الأساسي للصاروخ
+local primaryPart = rocket.PrimaryPart or rocket:FindFirstChildWhichIsA("BasePart", true)
+if not primaryPart then return end
+rocket.PrimaryPart = primaryPart
+
+-- 2. ضمان تماسك جميع أجزاء الصاروخ ككتلة واحدة
+for _, part in ipairs(rocket:GetDescendants()) do
+	if part:IsA("BasePart") and part ~= primaryPart then
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = primaryPart
+		weld.Part1 = part
+		weld.Parent = primaryPart
+	end
+end
+
+-- 3. جعل مقدمة الصاروخ تميل وتدور بواقعية مع اتجاه حركته (الفيزياء الهوائية)
+local lastPosition = primaryPart.Position
+local currentLookDirection = primaryPart.CFrame.LookVector
+
+RunService.Heartbeat:Connect(function(dt)
+	if not primaryPart or not primaryPart.Parent then return end
+	
+	local currentPosition = primaryPart.Position
+	local movementVector = currentPosition - lastPosition
+	
+	-- التحقق من أن الصاروخ يتحرك فعلياً
+	if movementVector.Magnitude > 0.05 then
+		local targetDirection = movementVector.Unit
+		
+		-- تنعيم الدوران لكي يميل الصاروخ بانسيابية (تأثير الجاذبية ومقاومة الهواء)
+		local smoothness = math.clamp(dt * 8, 0, 1)
+		currentLookDirection = currentLookDirection:Lerp(targetDirection, smoothness)
+		
+		-- تطبيق زاوية الميلان الواقعية مع الحفاظ على موقع الصاروخ الذي يحدده نظامك
+		local targetCFrame = CFrame.lookAt(currentPosition, currentPosition + currentLookDirection)
+		
+		-- إذا كان الصاروخ يعتمد على الفيزياء (غير مثبت) أو يتحرك بالكود:
+		if primaryPart.Anchored then
+			rocket:PivotTo(targetCFrame)
+		else
+			-- إضافة موازن دوران فيزيائي ناعم
+			local align = primaryPart:FindFirstChild("RealisticAlign")
+			if not align then
+				local att = Instance.new("Attachment", primaryPart)
+				align = Instance.new("AlignOrientation")
+				align.Name = "RealisticAlign"
+				align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+				align.Attachment0 = att
+				align.MaxTorque = 100000
+				align.Responsiveness = 15 -- نعومة الاستجابة للانحناء
+				align.Parent = primaryPart
+			end
+			align.CFrame = targetCFrame
+		end
+	end
+	
+	lastPosition = currentPosition
+end)
