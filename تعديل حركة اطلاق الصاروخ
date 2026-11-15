@@ -1,70 +1,65 @@
 local RunService = game:GetService("RunService")
-local rocket = script.Parent
 
--- 1. البحث الآمن عن الجزء الأساسي
-local primaryPart = nil
-if rocket:IsA("Model") then
-	primaryPart = rocket.PrimaryPart
+-- ===== SETTINGS =====
+local START_DELAY = 2                          -- seconds before launch
+local DURATION = 6                             -- flight time (seconds)
+local TARGET_OFFSET = Vector3.new(0, 0, -150)  -- landing spot, relative to start
+local HEIGHT = 120                             -- how high the path bends
+local DESTROY_AT_END = false
+local NOSE_AXIS = Vector3.new(0, 0, -1)        -- nose direction in pivot space
+-- ====================
+
+local model = script.Parent
+if not model:IsA("Model") then
+	warn("Put this Script directly inside the rocket Model")
+	return
 end
 
-if not primaryPart then
-	primaryPart = rocket:FindFirstChildWhichIsA("BasePart", true)
+for _, d in ipairs(model:GetDescendants()) do
+	if d:IsA("BasePart") then d.Anchored = true end
 end
 
-if not primaryPart then return end
+local startCF = model:GetPivot()
+local startLook = startCF:VectorToWorldSpace(NOSE_AXIS).Unit
+local startRot = startCF.Rotation
 
-if rocket:IsA("Model") then
-	rocket.PrimaryPart = primaryPart
+local P0 = startCF.Position
+local P3 = P0 + TARGET_OFFSET
+local P1 = P0 + Vector3.new(0, HEIGHT, 0)
+local P2 = P3 + Vector3.new(0, HEIGHT, 0)
+
+local function point(t)
+	local u = 1 - t
+	return u*u*u*P0 + 3*u*u*t*P1 + 3*u*t*t*P2 + t*t*t*P3
 end
 
--- 2. ضمان تماسك جميع أجزاء الصاروخ ككتلة واحدة
-for _, part in ipairs(rocket:GetDescendants()) do
-	if part:IsA("BasePart") and part ~= primaryPart then
-		local weld = Instance.new("WeldConstraint")
-		weld.Part0 = primaryPart
-		weld.Part1 = part
-		weld.Parent = primaryPart
+local function tangent(t)
+	local u = 1 - t
+	return 3*u*u*(P1-P0) + 6*u*t*(P2-P1) + 3*t*t*(P3-P2)
+end
+
+local function rotateTo(a, b)
+	local dot = math.clamp(a:Dot(b), -1, 1)
+	if dot > 0.99999 then return CFrame.identity end
+	local axis = a:Cross(b)
+	if axis.Magnitude < 1e-5 then
+		axis = a:Cross(Vector3.xAxis)
+		if axis.Magnitude < 1e-5 then axis = a:Cross(Vector3.zAxis) end
 	end
+	return CFrame.fromAxisAngle(axis.Unit, math.acos(dot))
 end
 
--- 3. توجيه الصاروخ بحيث يكون رأسه هو المتقدم دائماً
-local lastPosition = primaryPart.Position
-local currentLookDirection = primaryPart.CFrame.LookVector
-
-RunService.Heartbeat:Connect(function(dt)
-	if not primaryPart or not primaryPart.Parent then return end
-	
-	local currentPosition = primaryPart.Position
-	local movementVector = currentPosition - lastPosition
-	
-	if movementVector.Magnitude > 0.05 then
-		local targetDirection = movementVector.Unit
-		local smoothness = math.clamp(dt * 8, 0, 1)
-		currentLookDirection = currentLookDirection:Lerp(targetDirection, smoothness)
-		
-		-- تعديل الدوران ليتناسب مع الصواريخ المصممة عمودياً (رأس الصاروخ للأعلى)
-		-- إذا لاحظت أن الرأس متوجه لجهة أخرى، يمكنك تغيير 90 إلى -90 أو إزالة الـ Angles
-		local targetCFrame = CFrame.lookAt(currentPosition, currentPosition + currentLookDirection) * CFrame.Angles(math.rad(90), 0, 0)
-		
-		if primaryPart.Anchored then
-			if rocket:IsA("Model") then
-				rocket:PivotTo(targetCFrame)
-			end
-		else
-			local align = primaryPart:FindFirstChild("RealisticAlign")
-			if not align then
-				local att = Instance.new("Attachment", primaryPart)
-				align = Instance.new("AlignOrientation")
-				align.Name = "RealisticAlign"
-				align.Mode = Enum.OrientationAlignmentMode.OneAttachment
-				align.Attachment0 = att
-				align.MaxTorque = 100000
-				align.Responsiveness = 15
-				align.Parent = primaryPart
-			end
-			align.CFrame = targetCFrame
-		end
+task.wait(START_DELAY)
+local t0 = os.clock()
+local lastDir = startLook
+local conn
+conn = RunService.Heartbeat:Connect(function()
+	local t = math.min((os.clock() - t0) / DURATION, 1)
+	local dir = tangent(t)
+	if dir.Magnitude > 0.001 then lastDir = dir.Unit end
+	model:PivotTo(CFrame.new(point(t)) * rotateTo(startLook, lastDir) * startRot)
+	if t >= 1 then
+		conn:Disconnect()
+		if DESTROY_AT_END then model:Destroy() end
 	end
-	
-	lastPosition = currentPosition
 end)
