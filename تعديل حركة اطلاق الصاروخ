@@ -1,65 +1,187 @@
-local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local Debris = game:GetService("Debris")
 
--- ===== SETTINGS =====
-local START_DELAY = 2                          -- seconds before launch
-local DURATION = 6                             -- flight time (seconds)
-local TARGET_OFFSET = Vector3.new(0, 0, -150)  -- landing spot, relative to start
-local HEIGHT = 120                             -- how high the path bends
-local DESTROY_AT_END = false
-local NOSE_AXIS = Vector3.new(0, 0, -1)        -- nose direction in pivot space
--- ====================
+local REMOTE_NAME = "MapTargetSelected"
+local RESULT_NAME = "MapLaunchResult"
 
-local model = script.Parent
-if not model:IsA("Model") then
-	warn("Put this Script directly inside the rocket Model")
-	return
-end
+local FIRE_COOLDOWN = 0.4
+local MAP_RADIUS = 2000
+local TARGET_Y = 38
 
-for _, d in ipairs(model:GetDescendants()) do
-	if d:IsA("BasePart") then d.Anchored = true end
-end
-
-local startCF = model:GetPivot()
-local startLook = startCF:VectorToWorldSpace(NOSE_AXIS).Unit
-local startRot = startCF.Rotation
-
-local P0 = startCF.Position
-local P3 = P0 + TARGET_OFFSET
-local P1 = P0 + Vector3.new(0, HEIGHT, 0)
-local P2 = P3 + Vector3.new(0, HEIGHT, 0)
-
-local function point(t)
-	local u = 1 - t
-	return u*u*u*P0 + 3*u*u*t*P1 + 3*u*t*t*P2 + t*t*t*P3
-end
-
-local function tangent(t)
-	local u = 1 - t
-	return 3*u*u*(P1-P0) + 6*u*t*(P2-P1) + 3*t*t*(P3-P2)
-end
-
-local function rotateTo(a, b)
-	local dot = math.clamp(a:Dot(b), -1, 1)
-	if dot > 0.99999 then return CFrame.identity end
-	local axis = a:Cross(b)
-	if axis.Magnitude < 1e-5 then
-		axis = a:Cross(Vector3.xAxis)
-		if axis.Magnitude < 1e-5 then axis = a:Cross(Vector3.zAxis) end
+local function getOrCreateRemote(name)
+	local remote = ReplicatedStorage:FindFirstChild(name)
+	if not remote then
+		remote = Instance.new("RemoteEvent")
+		remote.Name = name
+		remote.Parent = ReplicatedStorage
 	end
-	return CFrame.fromAxisAngle(axis.Unit, math.acos(dot))
+	return remote
 end
 
-task.wait(START_DELAY)
-local t0 = os.clock()
-local lastDir = startLook
-local conn
-conn = RunService.Heartbeat:Connect(function()
-	local t = math.min((os.clock() - t0) / DURATION, 1)
-	local dir = tangent(t)
-	if dir.Magnitude > 0.001 then lastDir = dir.Unit end
-	model:PivotTo(CFrame.new(point(t)) * rotateTo(startLook, lastDir) * startRot)
-	if t >= 1 then
-		conn:Disconnect()
-		if DESTROY_AT_END then model:Destroy() end
+local remoteEvent = getOrCreateRemote(REMOTE_NAME)
+local resultEvent = getOrCreateRemote(RESULT_NAME)
+
+local lastFireByPlayer = {}
+
+Players.PlayerRemoving:Connect(function(player)
+	lastFireByPlayer[player] = nil
+end)
+
+local function isFiniteVector3(value)
+	if typeof(value) ~= "Vector3" then
+		return false
 	end
+	local x = value.X
+	local y = value.Y
+	local z = value.Z
+	if x ~= x or y ~= y or z ~= z then
+		return false
+	end
+	if math.abs(x) == math.huge or math.abs(y) == math.huge or math.abs(z) == math.huge then
+		return false
+	end
+	return true
+end
+
+local function isAlive(player)
+	local character = player.Character
+	if not character then
+		return false
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0
+end
+
+local function createBigExplosion(position)
+	local explosion = Instance.new("Explosion")
+	explosion.Position = position
+	explosion.BlastRadius = 28
+	explosion.BlastPressure = 500000
+	explosion.DestroyJointRadiusPercent = 0.4
+	explosion.Parent = Workspace
+
+	local sound = Instance.new("Sound")
+	sound.SoundId = "rbxassetid://138081500"
+	sound.Volume = 3
+	sound.PlaybackSpeed = 0.9
+	sound.Parent = Workspace
+	sound:Play()
+	Debris:AddItem(sound, 4)
+end
+
+local function launchRocketToTarget(rocketName, targetPos)
+	local rocketsFolder = Workspace:FindFirstChild("Rockets")
+	if not rocketsFolder then
+		return false, "NO ROCKETS AVAILABLE"
+	end
+
+	local template = rocketsFolder:FindFirstChild(rocketName)
+	if not template then
+		return false, "ROCKET NOT FOUND"
+	end
+	if not template:IsA("Model") and not template:IsA("BasePart") then
+		return false, "ROCKET NOT FOUND"
+	end
+
+	local rocketModel = template:Clone()
+	rocketModel.Parent = Workspace
+
+	task.spawn(function()
+		-- ===== SETTINGS =====
+		local CLIMB_HEIGHT = 450      -- higher = taller, steeper path
+		local FLIGHT_DURATION = 4.2   -- seconds
+		-- ====================
+
+		-- keep all parts fixed so physics cannot tumble the rocket
+		if rocketModel:IsA("BasePart") then rocketModel.Anchored = true end
+		for _, d in ipairs(rocketModel:GetDescendants()) do
+			if d:IsA("BasePart") then d.Anchored = true end
+		end
+
+		local startCF = rocketModel:GetPivot()
+		local startPos = startCF.Position
+		local controlPoint = startPos:Lerp(targetPos, 0.5) + Vector3.new(0, CLIMB_HEIGHT, 0)
+
+		-- the nose = the direction that points up while the template stands in Rockets
+		local nose = startCF:VectorToObjectSpace(Vector3.yAxis)
+
+		local function arc(a, b) -- rotation that turns direction a into direction b
+			local dot = math.clamp(a:Dot(b), -1, 1)
+			if dot > 0.99999 then return CFrame.identity end
+			local axis = a:Cross(b)
+			if axis.Magnitude < 1e-5 then
+				axis = a:Cross(Vector3.xAxis)
+				if axis.Magnitude < 1e-5 then axis = a:Cross(Vector3.zAxis) end
+			end
+			return CFrame.fromAxisAngle(axis.Unit, math.acos(dot))
+		end
+		local noseFix = arc(nose, Vector3.new(0, 0, -1))
+
+		local function bezier(t)
+			local u = 1 - t
+			return u * u * startPos + 2 * u * t * controlPoint + t * t * targetPos
+		end
+
+		local function tangent(t)
+			return 2 * (1 - t) * (controlPoint - startPos) + 2 * t * (targetPos - controlPoint)
+		end
+
+		local lastDir = (controlPoint - startPos).Unit
+		local t0 = os.clock()
+		while true do
+			local t = math.min((os.clock() - t0) / FLIGHT_DURATION, 1)
+			local dir = tangent(t)
+			if dir.Magnitude > 0.001 then lastDir = dir.Unit end
+			local pos = bezier(t)
+			rocketModel:PivotTo(CFrame.lookAt(pos, pos + lastDir) * noseFix)
+			if t >= 1 then break end
+			task.wait()
+		end
+
+		createBigExplosion(targetPos)
+		rocketModel:Destroy()
+	end)
+
+	return true, nil
+end
+
+remoteEvent.OnServerEvent:Connect(function(player, rocketName, targetPos)
+	local function respond(success, reason)
+		resultEvent:FireClient(player, success, reason)
+	end
+
+	if typeof(rocketName) ~= "string" then
+		respond(false, "CHOOSE A ROCKET")
+		return
+	end
+
+	if not isAlive(player) then
+		respond(false, "YOU MUST BE ALIVE")
+		return
+	end
+
+	local now = os.clock()
+	local lastFire = lastFireByPlayer[player]
+	if lastFire and now - lastFire < FIRE_COOLDOWN then
+		respond(false, "RELOADING")
+		return
+	end
+
+	if not isFiniteVector3(targetPos) then
+		respond(false, "INVALID TARGET")
+		return
+	end
+
+	if Vector3.new(targetPos.X, 0, targetPos.Z).Magnitude > MAP_RADIUS then
+		respond(false, "TARGET OUT OF BOUNDS")
+		return
+	end
+
+	targetPos = Vector3.new(targetPos.X, TARGET_Y, targetPos.Z)
+	lastFireByPlayer[player] = now
+
+	local success, reason = launchRocketToTarget(rocketName, targetPos)
+	respond(success, reason)
 end)
